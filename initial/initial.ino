@@ -1,207 +1,67 @@
-#define US_KEYBOARD 1
+#include <BleKeyboard.h>
+#include <Keypad.h>
+#include <RotaryEncoder.h>
 
-#include <Arduino.h>
-#include "BLEDevice.h"
-#include "BLEHIDDevice.h"
-#include "HIDTypes.h"
-#include "HIDKeyboardTypes.h"
+BleKeyboard bleKeyboard("Mohit8181");
 
-#define DEVICE_NAME "Mohit8181"
-#define PASSKEY 123456
+#define ROW_NUM 3
+#define COLUMN_NUM 2
 
-void bluetoothTask(void*);
-void typeText(const char* text);
+#define PIN_IN1 21
+#define PIN_IN2 19
+#define PIN_IN3 22  // Mute
 
+char keys[ROW_NUM][COLUMN_NUM] = {
+  { KEY_LEFT_ARROW, KEY_RIGHT_ARROW },
+  { KEY_UP_ARROW, KEY_TAB },
+  { KEY_DOWN_ARROW, KEY_NUM_ENTER }
+};
 
-bool isBleConnected = false;
+byte pin_rows[ROW_NUM] = { 18, 5, 17 };
+byte pin_column[COLUMN_NUM] = { 2, 4 };
+
+Keypad keypad = Keypad(makeKeymap(keys), pin_rows, pin_column, ROW_NUM, COLUMN_NUM);
+
+RotaryEncoder encoder(PIN_IN1, PIN_IN2, RotaryEncoder::LatchMode::TWO03);
 
 void setup() {
   Serial.begin(115200);
-  xTaskCreate(bluetoothTask, "bluetooth", 20000, NULL, 5, NULL);
-}
+  Serial.println("Starting BLE work!");
+  bleKeyboard.begin();
 
+  pinMode(PIN_IN3, INPUT_PULLUP);
+}
 
 void loop() {
-  if (isBleConnected && Serial.available()) {
-    String message = Serial.readString();
-    typeText(message.c_str());
-  }
-  delay(100);
-}
 
-void bleSecurity() {
-  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
-  esp_ble_io_cap_t iocap = ESP_IO_CAP_OUT;
-  uint8_t key_size = 16;
-  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-  uint8_t rsp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-  uint32_t passkey = PASSKEY;
-  uint8_t auth_option = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_DISABLE;
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &passkey, sizeof(uint32_t));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(uint8_t));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH, &auth_option, sizeof(uint8_t));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
-}
+  if (bleKeyboard.isConnected()) {
+    char key = keypad.getKey();
+    if (key) {
+      bleKeyboard.press(key);
+      delay(200);
+      bleKeyboard.release(key);
+    }
 
-struct InputReport {
-  uint8_t modifiers;       // bitmask: CTRL = 1, SHIFT = 2, ALT = 4
-  uint8_t reserved;        // must be 0
-  uint8_t pressedKeys[6];  // up to six concurrenlty pressed keys
-};
+    static int pos = 0;
+    encoder.tick();
 
-// Message (report) received when an LED's state changed
-struct OutputReport {
-  uint8_t leds;  // bitmask: num lock = 1, caps lock = 2, scroll lock = 4, compose = 8, kana = 16
-};
+    int newPos = encoder.getPosition();
+    if (pos != newPos) {
+      if ((int)(encoder.getDirection()) == 1) {
+        bleKeyboard.press(KEY_MEDIA_VOLUME_UP);
+        delay(100);
+        bleKeyboard.release(KEY_MEDIA_VOLUME_UP);
+      } else {
+        bleKeyboard.press(KEY_MEDIA_VOLUME_DOWN);
+        delay(100);
+        bleKeyboard.release(KEY_MEDIA_VOLUME_DOWN);
+      }
+      pos = newPos;
+    }
 
-static const uint8_t REPORT_MAP[] = {
-  USAGE_PAGE(1), 0x01,       // Generic Desktop Controls
-  USAGE(1), 0x06,            // Keyboard
-  COLLECTION(1), 0x01,       // Application
-  REPORT_ID(1), 0x01,        //   Report ID (1)
-  USAGE_PAGE(1), 0x07,       //   Keyboard/Keypad
-  USAGE_MINIMUM(1), 0xE0,    //   Keyboard Left Control
-  USAGE_MAXIMUM(1), 0xE7,    //   Keyboard Right Control
-  LOGICAL_MINIMUM(1), 0x00,  //   Each bit is either 0 or 1
-  LOGICAL_MAXIMUM(1), 0x01,
-  REPORT_COUNT(1), 0x08,  //   8 bits for the modifier keys
-  REPORT_SIZE(1), 0x01,
-  HIDINPUT(1), 0x02,      //   Data, Var, Abs
-  REPORT_COUNT(1), 0x01,  //   1 byte (unused)
-  REPORT_SIZE(1), 0x08,
-  HIDINPUT(1), 0x01,      //   Const, Array, Abs
-  REPORT_COUNT(1), 0x06,  //   6 bytes (for up to 6 concurrently pressed keys)
-  REPORT_SIZE(1), 0x08,
-  LOGICAL_MINIMUM(1), 0x00,
-  LOGICAL_MAXIMUM(1), 0x65,  //   101 keys
-  USAGE_MINIMUM(1), 0x00,
-  USAGE_MAXIMUM(1), 0x65,
-  HIDINPUT(1), 0x00,      //   Data, Array, Abs
-  REPORT_COUNT(1), 0x05,  //   5 bits (Num lock, Caps lock, Scroll lock, Compose, Kana)
-  REPORT_SIZE(1), 0x01,
-  USAGE_PAGE(1), 0x08,     //   LEDs
-  USAGE_MINIMUM(1), 0x01,  //   Num Lock
-  USAGE_MAXIMUM(1), 0x05,  //   Kana
-  LOGICAL_MINIMUM(1), 0x00,
-  LOGICAL_MAXIMUM(1), 0x01,
-  HIDOUTPUT(1), 0x02,     //   Data, Var, Abs
-  REPORT_COUNT(1), 0x01,  //   3 bits (Padding)
-  REPORT_SIZE(1), 0x03,
-  HIDOUTPUT(1), 0x01,  //   Const, Array, Abs
-  END_COLLECTION(0)    // End application collection
-};
-
-
-BLEHIDDevice* hid;
-BLECharacteristic* input;
-BLECharacteristic* output;
-
-const InputReport NO_KEY_PRESSED = {};
-
-
-class BleKeyboardCallbacks : public BLEServerCallbacks {
-
-  void onConnect(BLEServer* server) {
-    isBleConnected = true;
-
-    // Allow notifications for characteristics
-    BLE2902* cccDesc = (BLE2902*)input->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
-    cccDesc->setNotifications(true);
-
-    Serial.println("Client has connected");
-  }
-
-  void onDisconnect(BLEServer* server) {
-    isBleConnected = false;
-
-    // Disallow notifications for characteristics
-    BLE2902* cccDesc = (BLE2902*)input->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
-    cccDesc->setNotifications(false);
-
-    Serial.println("Client has disconnected");
-  }
-};
-
-
-class OutputCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* characteristic) {
-    OutputReport* report = (OutputReport*)characteristic->getData();
-    Serial.print("LED state: ");
-    Serial.print((int)report->leds);
-    Serial.println();
-  }
-};
-
-
-void bluetoothTask(void*) {
-
-  // initialize the device
-  BLEDevice::init(DEVICE_NAME);
-  BLEServer* server = BLEDevice::createServer();
-  server->setCallbacks(new BleKeyboardCallbacks());
-
-  // create an HID device
-  hid = new BLEHIDDevice(server);
-  input = hid->inputReport(1);    // report ID
-  output = hid->outputReport(1);  // report ID
-  output->setCallbacks(new OutputCallbacks());
-
-  // set manufacturer name
-  hid->manufacturer()->setValue("Maker Community");
-  // set USB vendor and product ID
-  hid->pnp(0x02, 0xe502, 0xa111, 0x0210);
-  // information about HID device: device is not localized, device can be connected
-  hid->hidInfo(0x00, 0x02);
-
-  // set report map
-  hid->reportMap((uint8_t*)REPORT_MAP, sizeof(REPORT_MAP));
-  hid->startServices();
-
-  // set battery level to 100%
-  hid->setBatteryLevel(100);
-
-  // advertise the services
-  BLEAdvertising* advertising = server->getAdvertising();
-  advertising->setAppearance(HID_KEYBOARD);
-  advertising->addServiceUUID(hid->hidService()->getUUID());
-  advertising->addServiceUUID(hid->deviceInfo()->getUUID());
-  advertising->addServiceUUID(hid->batteryService()->getUUID());
-  advertising->start();
-
-  bleSecurity();
-
-  Serial.println("BLE ready");
-  delay(portMAX_DELAY);
-};
-
-
-void typeText(const char* text) {
-  int len = strlen(text);
-  for (int i = 0; i < len; i++) {
-    uint8_t val = (uint8_t)text[i];
-    if (val > KEYMAP_SIZE)
-      continue;
-    KEYMAP map = keymap[val];
-
-    InputReport report = {
-      .modifiers = map.modifier,
-      .reserved = 0,
-      .pressedKeys = {
-        map.usage,
-        0, 0, 0, 0, 0 }
-    };
-
-    input->setValue((uint8_t*)&report, sizeof(report));
-    input->notify();
-
-    delay(5);
-
-    input->setValue((uint8_t*)&NO_KEY_PRESSED, sizeof(NO_KEY_PRESSED));
-    input->notify();
-
-    delay(5);
+    if (digitalRead(PIN_IN3) == LOW) {
+      bleKeyboard.write(KEY_MEDIA_MUTE);
+      delay(1000);
+    }
   }
 }
